@@ -22,6 +22,8 @@ log = logging.getLogger(__name__)
 
 import socket    # Basic TCP/IP communication on the internet
 import _thread   # Response computation runs concurrently with main program
+import os
+from urllib.parse import urlsplit, unquote
 
 
 def listen(portnum):
@@ -72,11 +74,22 @@ CAT = """
 # See:  https://en.wikipedia.org/wiki/List_of_HTTP_status_codes
 # or    http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html
 ##
-STATUS_OK = "HTTP/1.0 200 OK\n\n"
-STATUS_FORBIDDEN = "HTTP/1.0 403 Forbidden\n\n"
-STATUS_NOT_FOUND = "HTTP/1.0 404 Not Found\n\n"
-STATUS_NOT_IMPLEMENTED = "HTTP/1.0 401 Not Implemented\n\n"
+STATUS_OK = "HTTP/1.0 200 OK"
+STATUS_FORBIDDEN = "HTTP/1.0 403 Forbidden"
+STATUS_NOT_FOUND = "HTTP/1.0 404 Not Found"
+STATUS_NOT_IMPLEMENTED = "HTTP/1.0 501 Not Implemented"
 
+def send_response(sock, status, body, content_type="text/plain"):
+    response = (
+        status + "\r\n"
+        + "Content-Type: " + content_type + "\r\n"
+        + "Content-Length: " + str(len(body.encode("utf-8"))) + "\r\n"
+        + "Connection: close\r\n"
+        + "\r\n"
+        + body
+    )
+
+    transmit(response, sock)
 
 def respond(sock):
     """
@@ -85,18 +98,83 @@ def respond(sock):
     """
     sent = 0
     request = sock.recv(1024)  # We accept only short requests
-    request = str(request, encoding='utf-8', errors='strict')
+    request = request.decode("utf-8", errors="replace")
+    
     log.info("--- Received request ----")
     log.info("Request was {}\n***\n".format(request))
 
     parts = request.split()
-    if len(parts) > 1 and parts[0] == "GET":
-        transmit(STATUS_OK, sock)
-        transmit(CAT, sock)
+    if len(parts) < 2 or parts[0] != "GET":
+        send_response(
+            sock,
+            STATUS_NOT_IMPLEMENTED,
+            "Only GET requests are supported"
+        )
+        return
+
+    url_path = urlsplit(parts[1]).path
+    url_path = unquote(url_path)
+
+    relative_path = url_path.lstrip("/")
+
+    if(
+        url_path.startswith("//")
+        or relative_path.startswith(("~", ".."))
+        or ".." in relative_path.split("/")
+    ):
+        send_response(
+            sock,
+            STATUS_FORBIDDEN,
+            "403 Forbidden"
+        )
+        return
+
+    if not relative_path.endswith((".html", ".css")):
+            send_response(
+                sock,
+                STATUS_NOT_FOUND,
+                "404 Not Found"
+            )
+            return
+
+    options = get_options()
+    docroot = os.path.realpath(options.DOCROOT)
+
+    file_path = os.path.realpath(
+        os.path.join(docroot, relative_path)
+    )
+
+    if os.path.commonpath([docroot, file_path]) != docroot:
+            send_response(
+                sock,
+                STATUS_FORBIDDEN,
+                "403 Forbidden"
+            )
+            return
+
+    if not os.path.isfile(file_path):
+            send_response(
+                sock,
+                STATUS_NOT_FOUND,
+                "404 Not Found"
+            )
+            return
+
+    with open(file_path, "r", encoding="utf-8") as file:
+            content = file.read()
+
+    if relative_path.endswith(".html"):
+        content_type = "text/html; charset=utf-8"
     else:
-        log.info("Unhandled request: {}".format(request))
-        transmit(STATUS_NOT_IMPLEMENTED, sock)
-        transmit("\nI don't handle this request: {}\n".format(request), sock)
+        content_type = "text/css; charset=utf-8"
+
+    send_response(
+        sock,
+        STATUS_OK,
+        content,
+        content_type
+    )
+
 
     sock.shutdown(socket.SHUT_RDWR)
     sock.close()
